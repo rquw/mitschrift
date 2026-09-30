@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mitschrift</title>
+<style>
+  :root { --bg:#e9e9ec; --paper:#fff; --ink:#1b1b1f; --muted:#8a8a93; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); font-family: Georgia, "Times New Roman", serif; color:var(--ink); }
+  header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center;
+    padding:10px 16px; font:13px/1 system-ui, sans-serif; color:var(--muted); background:var(--bg); }
+  #dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#c33; margin-right:6px; vertical-align:middle; }
+  #dot.on { background:#2a2; }
+  .wrap { padding:8px 16px 60px; }
+  textarea { display:block; margin:0 auto; width:210mm; max-width:100%; min-height:297mm; padding:25mm 20mm;
+    border:0; outline:0; resize:none; overflow:hidden; background:var(--paper); color:var(--ink);
+    font:12pt/1.5 Georgia, "Times New Roman", serif; box-shadow:0 2px 12px rgba(0,0,0,.12); }
+  @media (max-width:600px){ textarea { padding:20px 16px; min-height:80vh; } }
+  @page { size:A4; margin:0; }
+  @media print { header { display:none; } body { background:#fff; } .wrap { padding:0; } textarea { box-shadow:none; } }
+</style>
+</head>
+<body>
+<header><span>Mitschrift</span><span><span id="dot"></span><span id="peers">verbinde…</span></span></header>
+<div class="wrap"><textarea id="ta" spellcheck="false" placeholder="Einfach losschreiben…"></textarea></div>
+
+<script type="module">
+import * as Y from 'https://esm.sh/yjs@13.6.20'
+import { joinRoom } from 'https://esm.sh/trystero@0.21.4/nostr'
+
+const doc = new Y.Doc()
+const text = doc.getText('t')
+const ta = document.getElementById('ta')
+const KEY = 'mitschrift-state'
+
+const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px' }
+
+// letzter Stand im Browser, damit nix weg ist wenn grad keiner online war
+try {
+  const s = localStorage.getItem(KEY)
+  if (s) Y.applyUpdate(doc, Uint8Array.from(atob(s), c => c.charCodeAt(0)), 'local')
+} catch {}
+ta.value = text.toString()
+grow()
+
+let saveT
+const save = () => {
+  clearTimeout(saveT)
+  saveT = setTimeout(() => {
+    try {
+      const u = Y.encodeStateAsUpdate(doc)
+      let bin = ''
+      for (const b of u) bin += String.fromCharCode(b)
+      localStorage.setItem(KEY, btoa(bin))
+    } catch {}
+  }, 500)
+}
+
+const room = joinRoom({ appId: 'fabiosch-mitschrift' }, 'main')
+const [sendUpd, getUpd] = room.makeAction('u')
+getUpd(d => Y.applyUpdate(doc, new Uint8Array(d), 'remote'))
+
+let peers = 0
+const show = () => {
+  document.getElementById('dot').className = peers ? 'on' : ''
+  document.getElementById('peers').textContent = peers ? `${peers + 1} online` : 'nur du'
+}
+room.onPeerJoin(id => { peers++; show(); sendUpd(Array.from(Y.encodeStateAsUpdate(doc)), id) })
+room.onPeerLeave(() => { peers = Math.max(0, peers - 1); show() })
+setTimeout(show, 3000)
+
+doc.on('update', (u, origin) => {
+  if (origin === 'me') sendUpd(Array.from(u))
+  save()
+})
+
+ta.addEventListener('input', () => {
+  const a = text.toString(), b = ta.value
+  let s = 0
+  while (s < a.length && s < b.length && a[s] === b[s]) s++
+  let e = 0
+  while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++
+  doc.transact(() => {
+    if (a.length - s - e) text.delete(s, a.length - s - e)
+    const ins = b.slice(s, b.length - e)
+    if (ins) text.insert(s, ins)
+  }, 'me')
+  grow()
+})
+
+// fremde Änderungen reinholen ohne dass dein Cursor rumspringt
+text.observe(ev => {
+  if (ev.transaction.origin === 'me') return
+  let ss = ta.selectionStart, se = ta.selectionEnd, i = 0
+  for (const op of ev.delta) {
+    if (op.retain) i += op.retain
+    else if (op.insert) {
+      const l = op.insert.length
+      if (i < ss) ss += l
+      if (i < se) se += l
+      i += l
+    } else if (op.delete) {
+      const d = op.delete
+      if (i < ss) ss -= Math.min(d, ss - i)
+      if (i < se) se -= Math.min(d, se - i)
+    }
+  }
+  ta.value = text.toString()
+  if (document.activeElement === ta) ta.setSelectionRange(ss, se)
+  grow()
+})
+</script>
+</body>
+</html>
