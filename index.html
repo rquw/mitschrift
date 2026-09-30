@@ -4,127 +4,187 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mitschrift</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
+<script type="importmap">
+{ "imports": {
+  "yjs": "https://esm.sh/yjs@13.6.20",
+  "quill": "https://esm.sh/quill@2.0.3",
+  "y-quill": "https://esm.sh/y-quill@1.0.0?external=yjs,quill",
+  "y-protocols/awareness": "https://esm.sh/y-protocols@1.0.6/awareness?external=yjs",
+  "quill-cursors": "https://esm.sh/quill-cursors@4.0.3?external=quill",
+  "mqtt": "https://esm.sh/mqtt@5.10.1"
+} }
+</script>
 <style>
   :root { --bg:#e9e9ec; --paper:#fff; --ink:#1b1b1f; --muted:#8a8a93; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); font-family: Georgia, "Times New Roman", serif; color:var(--ink); }
-  header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center;
-    padding:10px 16px; font:13px/1 system-ui, sans-serif; color:var(--muted); background:var(--bg); }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family: system-ui, sans-serif; }
+  .top { position:sticky; top:0; z-index:5; background:var(--bg); padding:8px 16px 6px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; font-size:13px; color:var(--muted); margin-bottom:6px; }
+  header b { color:var(--ink); font-weight:600; }
+  #name { border:1px solid #ccc; border-radius:6px; padding:3px 7px; font:inherit; width:120px; background:#fff; }
   #dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#c33; margin-right:6px; vertical-align:middle; }
   #dot.on { background:#2a2; }
-  .wrap { padding:8px 16px 60px; }
-  textarea { display:block; margin:0 auto; width:210mm; max-width:100%; min-height:297mm; padding:25mm 20mm;
-    border:0; outline:0; resize:none; overflow:hidden; background:var(--paper); color:var(--ink);
-    font:12pt/1.5 Georgia, "Times New Roman", serif; box-shadow:0 2px 12px rgba(0,0,0,.12); }
-  @media (max-width:600px){ textarea { padding:20px 16px; min-height:80vh; } }
+  .ql-toolbar.ql-snow { width:210mm; max-width:100%; margin:0 auto; background:#fff; border:0; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,.1); }
+  .wrap { padding:10px 16px 80px; }
+  #paper { width:210mm; max-width:100%; margin:0 auto; background:var(--paper); box-shadow:0 2px 12px rgba(0,0,0,.12);
+    background-image:repeating-linear-gradient(to bottom, transparent 0, transparent calc(297mm - 1px), #d4d4da calc(297mm - 1px), #d4d4da 297mm); }
+  .ql-container.ql-snow { border:0; font:12pt/1.5 Georgia, "Times New Roman", serif; }
+  .ql-editor { min-height:297mm; padding:25mm 20mm; }
+  .ql-editor img { max-width:100%; }
+  .ql-editor.ql-blank::before { left:20mm; font-style:normal; color:#aaa; }
+  @media (max-width:600px){ .ql-editor { padding:20px 16px; min-height:80vh; } #paper { background-image:none; } }
   @page { size:A4; margin:0; }
-  @media print { header { display:none; } body { background:#fff; } .wrap { padding:0; } textarea { box-shadow:none; } }
+  @media print { .top { display:none; } body { background:#fff; } .wrap { padding:0; } #paper { box-shadow:none; background-image:none; } .ql-cursors { display:none; } }
 </style>
 </head>
 <body>
-<header><span>Mitschrift</span><span><span id="dot"></span><span id="peers">verbinde…</span></span></header>
-<div class="wrap"><textarea id="ta" spellcheck="false" placeholder="Einfach losschreiben…"></textarea></div>
+<div class="top">
+  <header>
+    <b>Mitschrift</b>
+    <span>
+      <input id="name" placeholder="Dein Name" maxlength="20">
+      &nbsp;<span id="dot"></span><span id="peers">verbinde…</span>
+    </span>
+  </header>
+  <div id="tb">
+    <select class="ql-header"><option value="1"></option><option value="2"></option><option value="3"></option><option selected></option></select>
+    <select class="ql-size"><option value="small"></option><option selected></option><option value="large"></option><option value="huge"></option></select>
+    <button class="ql-bold"></button><button class="ql-italic"></button><button class="ql-underline"></button><button class="ql-strike"></button>
+    <select class="ql-color"></select><select class="ql-background"></select>
+    <button class="ql-script" value="sub"></button><button class="ql-script" value="super"></button>
+    <button class="ql-list" value="ordered"></button><button class="ql-list" value="bullet"></button><button class="ql-list" value="check"></button>
+    <button class="ql-indent" value="-1"></button><button class="ql-indent" value="+1"></button>
+    <select class="ql-align"></select>
+    <button class="ql-blockquote"></button><button class="ql-code-block"></button>
+    <button class="ql-link"></button><button class="ql-image"></button>
+    <button class="ql-clean"></button>
+  </div>
+</div>
+<div class="wrap"><div id="paper"><div id="ed"></div></div></div>
 
 <script type="module">
-import * as Y from 'https://esm.sh/yjs@13.6.20'
-import mqtt from 'https://esm.sh/mqtt@5.10.1'
+import * as Y from 'yjs'
+import Quill from 'quill'
+import QuillCursors from 'quill-cursors'
+import { QuillBinding } from 'y-quill'
+import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate, removeAwarenessStates } from 'y-protocols/awareness'
+import mqtt from 'mqtt'
+
+Quill.register('modules/cursors', QuillCursors)
 
 const doc = new Y.Doc()
 const text = doc.getText('t')
-const ta = document.getElementById('ta')
 const T = 'fabiosch/mitschrift/v2'
-const me = Math.random().toString(36).slice(2)
 const KEY = 'mitschrift-v2'
-
-const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px' }
 const toB64 = u => { let s = ''; for (const b of u) s += String.fromCharCode(b); return btoa(s) }
 const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
 
 try { const s = localStorage.getItem(KEY); if (s) Y.applyUpdate(doc, fromB64(s), 'local') } catch {}
-ta.value = text.toString()
-grow()
 
-const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'ms_' + me, reconnectPeriod: 2000 })
+// Bilder verkleinern, sonst wird das Dokument für den Relay zu fett
+const shrink = file => new Promise(res => {
+  const img = new Image()
+  img.onload = () => {
+    const k = Math.min(1, 1000 / Math.max(img.width, img.height))
+    const c = document.createElement('canvas')
+    c.width = Math.round(img.width * k); c.height = Math.round(img.height * k)
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+    URL.revokeObjectURL(img.src)
+    res(c.toDataURL('image/jpeg', 0.7))
+  }
+  img.src = URL.createObjectURL(file)
+})
 
-// kompletter Stand als retained message, damit Neue sofort alles sehen
+const quill = new Quill('#ed', {
+  theme: 'snow',
+  placeholder: 'Einfach losschreiben…',
+  modules: { toolbar: '#tb', cursors: true, history: { userOnly: true } }
+})
+
+const insertImage = async file => {
+  const url = await shrink(file)
+  const r = quill.getSelection(true)
+  quill.insertEmbed(r.index, 'image', url, 'user')
+  quill.setSelection(r.index + 1, 0, 'user')
+}
+
+quill.getModule('toolbar').addHandler('image', () => {
+  const inp = document.createElement('input')
+  inp.type = 'file'; inp.accept = 'image/*'
+  inp.onchange = () => inp.files[0] && insertImage(inp.files[0])
+  inp.click()
+})
+
+const grabImages = (e, files) => {
+  const imgs = [...(files || [])].filter(f => f.type.startsWith('image/'))
+  if (!imgs.length) return
+  e.preventDefault(); e.stopPropagation()
+  imgs.forEach(insertImage)
+}
+quill.root.addEventListener('paste', e => grabImages(e, e.clipboardData?.files), true)
+quill.root.addEventListener('drop', e => grabImages(e, e.dataTransfer?.files), true)
+
+const awareness = new Awareness(doc)
+const colors = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#0aa5a5', '#d62fa0', '#8a6d00']
+const nameIn = document.getElementById('name')
+nameIn.value = localStorage.getItem('mitschrift-name') || ''
+const setUser = () => awareness.setLocalStateField('user', {
+  name: nameIn.value.trim() || 'Anonym',
+  color: colors[doc.clientID % colors.length]
+})
+setUser()
+nameIn.addEventListener('input', () => { try { localStorage.setItem('mitschrift-name', nameIn.value) } catch {}; setUser() })
+
+new QuillBinding(text, quill, awareness)
+
+const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'ms_' + doc.clientID + '_' + Date.now(), reconnectPeriod: 2000 })
+
 let stateT
 const pushState = () => {
   clearTimeout(stateT)
   stateT = setTimeout(() => {
     const full = Y.encodeStateAsUpdate(doc)
-    client.publish(T + '/s', full, { retain: true })
+    if (client.connected) client.publish(T + '/s', full, { retain: true })
     try { localStorage.setItem(KEY, toB64(full)) } catch {}
   }, 1000)
 }
 
-const seen = new Map()
 const show = () => {
-  const now = Date.now()
-  for (const [id, t] of seen) if (now - t > 12000) seen.delete(id)
-  const on = client.connected
-  document.getElementById('dot').className = on ? 'on' : ''
-  document.getElementById('peers').textContent = !on ? 'offline' : seen.size ? `${seen.size + 1} online` : 'nur du'
+  const n = awareness.getStates().size
+  document.getElementById('dot').className = client.connected ? 'on' : ''
+  document.getElementById('peers').textContent = !client.connected ? 'offline' : n > 1 ? `${n} online` : 'nur du'
 }
-setInterval(() => { if (client.connected) client.publish(T + '/p', me); show() }, 4000)
+const sendAwareness = ids => { if (client.connected) client.publish(T + '/a', encodeAwarenessUpdate(awareness, ids)) }
 
 client.on('connect', () => {
-  client.subscribe([T + '/u', T + '/s', T + '/p'])
-  client.publish(T + '/p', me)
+  client.subscribe([T + '/u', T + '/s', T + '/a'])
   client.publish(T + '/u', Y.encodeStateAsUpdate(doc))
+  sendAwareness([doc.clientID])
   show()
 })
 client.on('close', show)
 
 client.on('message', (topic, msg) => {
-  if (topic === T + '/p') {
-    const id = msg.toString()
-    if (id !== me) { const isNew = !seen.has(id); seen.set(id, Date.now()); show(); if (isNew) client.publish(T + '/p', me) }
-    return
-  }
   if (!msg.length) return
-  try { Y.applyUpdate(doc, new Uint8Array(msg), 'remote') } catch {}
+  try {
+    if (topic === T + '/a') applyAwarenessUpdate(awareness, new Uint8Array(msg), 'remote')
+    else Y.applyUpdate(doc, new Uint8Array(msg), 'remote')
+  } catch {}
+})
+
+awareness.on('update', ({ added, updated, removed }, origin) => {
+  if (origin === 'remote') { if (added.length) sendAwareness([doc.clientID]) }
+  else sendAwareness([...added, ...updated, ...removed])
+  show()
 })
 
 doc.on('update', (u, origin) => {
-  if (origin === 'me' && client.connected) client.publish(T + '/u', u)
+  if (origin !== 'remote' && origin !== 'local' && client.connected) client.publish(T + '/u', u)
   pushState()
 })
 
-ta.addEventListener('input', () => {
-  const a = text.toString(), b = ta.value
-  let s = 0
-  while (s < a.length && s < b.length && a[s] === b[s]) s++
-  let e = 0
-  while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++
-  doc.transact(() => {
-    if (a.length - s - e) text.delete(s, a.length - s - e)
-    const ins = b.slice(s, b.length - e)
-    if (ins) text.insert(s, ins)
-  }, 'me')
-  grow()
-})
-
-// fremde Änderungen reinholen ohne dass dein Cursor rumspringt
-text.observe(ev => {
-  if (ev.transaction.origin === 'me') return
-  let ss = ta.selectionStart, se = ta.selectionEnd, i = 0
-  for (const op of ev.delta) {
-    if (op.retain) i += op.retain
-    else if (op.insert) {
-      const l = op.insert.length
-      if (i < ss) ss += l
-      if (i < se) se += l
-      i += l
-    } else if (op.delete) {
-      const d = op.delete
-      if (i < ss) ss -= Math.min(d, ss - i)
-      if (i < se) se -= Math.min(d, se - i)
-    }
-  }
-  ta.value = text.toString()
-  if (document.activeElement === ta) ta.setSelectionRange(ss, se)
-  grow()
-})
+addEventListener('beforeunload', () => removeAwarenessStates(awareness, [doc.clientID], 'unload'))
 </script>
 </body>
 </html>
