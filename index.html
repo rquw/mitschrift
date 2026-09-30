@@ -27,52 +27,67 @@
 
 <script type="module">
 import * as Y from 'https://esm.sh/yjs@13.6.20'
-import { joinRoom } from 'https://esm.sh/trystero@0.21.4/nostr'
+import mqtt from 'https://esm.sh/mqtt@5.10.1'
 
 const doc = new Y.Doc()
 const text = doc.getText('t')
 const ta = document.getElementById('ta')
-const KEY = 'mitschrift-state'
+const T = 'fabiosch/mitschrift/v2'
+const me = Math.random().toString(36).slice(2)
+const KEY = 'mitschrift-v2'
 
 const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px' }
+const toB64 = u => { let s = ''; for (const b of u) s += String.fromCharCode(b); return btoa(s) }
+const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
 
-// letzter Stand im Browser, damit nix weg ist wenn grad keiner online war
-try {
-  const s = localStorage.getItem(KEY)
-  if (s) Y.applyUpdate(doc, Uint8Array.from(atob(s), c => c.charCodeAt(0)), 'local')
-} catch {}
+try { const s = localStorage.getItem(KEY); if (s) Y.applyUpdate(doc, fromB64(s), 'local') } catch {}
 ta.value = text.toString()
 grow()
 
-let saveT
-const save = () => {
-  clearTimeout(saveT)
-  saveT = setTimeout(() => {
-    try {
-      const u = Y.encodeStateAsUpdate(doc)
-      let bin = ''
-      for (const b of u) bin += String.fromCharCode(b)
-      localStorage.setItem(KEY, btoa(bin))
-    } catch {}
-  }, 500)
+const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'ms_' + me, reconnectPeriod: 2000 })
+
+// kompletter Stand als retained message, damit Neue sofort alles sehen
+let stateT
+const pushState = () => {
+  clearTimeout(stateT)
+  stateT = setTimeout(() => {
+    const full = Y.encodeStateAsUpdate(doc)
+    client.publish(T + '/s', full, { retain: true })
+    try { localStorage.setItem(KEY, toB64(full)) } catch {}
+  }, 1000)
 }
 
-const room = joinRoom({ appId: 'fabiosch-mitschrift' }, 'main')
-const [sendUpd, getUpd] = room.makeAction('u')
-getUpd(d => Y.applyUpdate(doc, new Uint8Array(d), 'remote'))
-
-let peers = 0
+const seen = new Map()
 const show = () => {
-  document.getElementById('dot').className = peers ? 'on' : ''
-  document.getElementById('peers').textContent = peers ? `${peers + 1} online` : 'nur du'
+  const now = Date.now()
+  for (const [id, t] of seen) if (now - t > 12000) seen.delete(id)
+  const on = client.connected
+  document.getElementById('dot').className = on ? 'on' : ''
+  document.getElementById('peers').textContent = !on ? 'offline' : seen.size ? `${seen.size + 1} online` : 'nur du'
 }
-room.onPeerJoin(id => { peers++; show(); sendUpd(Array.from(Y.encodeStateAsUpdate(doc)), id) })
-room.onPeerLeave(() => { peers = Math.max(0, peers - 1); show() })
-setTimeout(show, 3000)
+setInterval(() => { if (client.connected) client.publish(T + '/p', me); show() }, 4000)
+
+client.on('connect', () => {
+  client.subscribe([T + '/u', T + '/s', T + '/p'])
+  client.publish(T + '/p', me)
+  client.publish(T + '/u', Y.encodeStateAsUpdate(doc))
+  show()
+})
+client.on('close', show)
+
+client.on('message', (topic, msg) => {
+  if (topic === T + '/p') {
+    const id = msg.toString()
+    if (id !== me) { const isNew = !seen.has(id); seen.set(id, Date.now()); show(); if (isNew) client.publish(T + '/p', me) }
+    return
+  }
+  if (!msg.length) return
+  try { Y.applyUpdate(doc, new Uint8Array(msg), 'remote') } catch {}
+})
 
 doc.on('update', (u, origin) => {
-  if (origin === 'me') sendUpd(Array.from(u))
-  save()
+  if (origin === 'me' && client.connected) client.publish(T + '/u', u)
+  pushState()
 })
 
 ta.addEventListener('input', () => {
