@@ -43,7 +43,7 @@
   <header>
     <b>Mitschrift</b>
     <span>
-      <input id="name" placeholder="Dein Name" maxlength="20">
+      <span id="save" style="margin-right:10px"></span><input id="name" placeholder="Dein Name" maxlength="20">
       &nbsp;<span id="dot"></span><span id="peers">verbinde…</span>
     </span>
   </header>
@@ -77,10 +77,36 @@ const doc = new Y.Doc()
 const text = doc.getText('t')
 const T = 'fabiosch/mitschrift/v3'
 const KEY = 'mitschrift-v3'
-const toB64 = u => { let s = ''; for (const b of u) s += String.fromCharCode(b); return btoa(s) }
+const SB_URL='https://iringgktpsjrygqduqao.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlyaW5nZ2t0cHNqcnlncWR1cWFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2MTc3NzIsImV4cCI6MjA5MjE5Mzc3Mn0.8TuU9pkeKAnlUHw6w3WQYgMsMQ1o_fo1vkaBCBHr2sI';
+const DB = SB_URL + '/rest/v1/mitschrift?id=eq.main'
+const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
+const toB64 = u => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s) }
 const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
+const saveEl = document.getElementById('save')
 
 try { const s = localStorage.getItem(KEY); if (s) Y.applyUpdate(doc, fromB64(s), 'local') } catch {}
+
+const dbLoad = async () => {
+  const r = await fetch(DB + '&select=state', { headers: H, cache: 'no-store' })
+  const [row] = await r.json()
+  if (row?.state) Y.applyUpdate(doc, fromB64(row.state), 'db')
+}
+try { await dbLoad(); saveEl.textContent = 'gespeichert' } catch { saveEl.textContent = 'DB nicht erreichbar' }
+
+// erst den DB-Stand reinmergen, dann speichern, damit nix von anderen überschrieben wird
+let dirty = false, saving = false, saveT
+const dbSave = async () => {
+  if (saving) { saveT = setTimeout(dbSave, 500); return }
+  saving = true; dirty = false
+  try {
+    await dbLoad()
+    const r = await fetch(DB, { method: 'PATCH', headers: H, body: JSON.stringify({ state: toB64(Y.encodeStateAsUpdate(doc)), updated_at: new Date().toISOString() }) })
+    if (!r.ok) throw 0
+    saveEl.textContent = dirty ? 'speichert…' : 'gespeichert'
+  } catch { dirty = true; saveEl.textContent = 'Speichern fehlgeschlagen, versuch nochmal…'; saveT = setTimeout(dbSave, 3000) }
+  saving = false
+}
 
 // Bilder verkleinern, sonst wird das Dokument für den Relay zu fett
 const shrink = file => new Promise(res => {
@@ -140,14 +166,15 @@ new QuillBinding(text, quill, awareness)
 
 const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'ms_' + doc.clientID + '_' + Date.now(), reconnectPeriod: 2000 })
 
-let stateT
-const pushState = () => {
-  clearTimeout(stateT)
-  stateT = setTimeout(() => {
-    const full = Y.encodeStateAsUpdate(doc)
-    if (client.connected) client.publish(T + '/s', full, { retain: true })
-    try { localStorage.setItem(KEY, toB64(full)) } catch {}
-  }, 1000)
+let localT
+const pushState = origin => {
+  clearTimeout(localT)
+  localT = setTimeout(() => { try { localStorage.setItem(KEY, toB64(Y.encodeStateAsUpdate(doc))) } catch {} }, 1000)
+  if (origin === 'db' || origin === 'remote') return
+  dirty = true
+  saveEl.textContent = 'speichert…'
+  clearTimeout(saveT)
+  saveT = setTimeout(dbSave, 1500)
 }
 
 const show = () => {
@@ -158,7 +185,7 @@ const show = () => {
 const sendAwareness = ids => { if (client.connected) client.publish(T + '/a', encodeAwarenessUpdate(awareness, ids)) }
 
 client.on('connect', () => {
-  client.subscribe([T + '/u', T + '/s', T + '/a'])
+  client.subscribe([T + '/u', T + '/a'])
   client.publish(T + '/u', Y.encodeStateAsUpdate(doc))
   sendAwareness([doc.clientID])
   show()
@@ -180,11 +207,14 @@ awareness.on('update', ({ added, updated, removed }, origin) => {
 })
 
 doc.on('update', (u, origin) => {
-  if (origin !== 'remote' && origin !== 'local' && client.connected) client.publish(T + '/u', u)
-  pushState()
+  if (origin !== 'remote' && origin !== 'local' && origin !== 'db' && client.connected) client.publish(T + '/u', u)
+  pushState(origin)
 })
 
-addEventListener('beforeunload', () => removeAwarenessStates(awareness, [doc.clientID], 'unload'))
+addEventListener('beforeunload', e => {
+  removeAwarenessStates(awareness, [doc.clientID], 'unload')
+  if (dirty) { dbSave(); e.preventDefault() }
+})
 </script>
 </body>
 </html>
