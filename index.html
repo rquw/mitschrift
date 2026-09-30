@@ -75,8 +75,8 @@ Quill.register('modules/cursors', QuillCursors)
 
 const doc = new Y.Doc()
 const text = doc.getText('t')
-const T = 'fabiosch/mitschrift/v2'
-const KEY = 'mitschrift-v2'
+const T = 'fabiosch/mitschrift/v3'
+const KEY = 'mitschrift-v3'
 const toB64 = u => { let s = ''; for (const b of u) s += String.fromCharCode(b); return btoa(s) }
 const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
 
