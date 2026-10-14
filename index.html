@@ -144,11 +144,138 @@ const download = (blob, name) => {
   a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 const frameDocument = (markup) => '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; font-src data: blob:; style-src \'unsafe-inline\';"><style>html,body{margin:0;background:white} .docx-wrapper{padding:0!important;background:white!important} section.docx{box-shadow:none!important;margin:0 auto!important} @media print{section.docx{break-after:page}}</style></head><body>' + markup + '</body></html>'
+const asArrayBuffer = bytes => bytes instanceof ArrayBuffer ? bytes.slice(0) : bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)
+const xmlElements = (node, name) => [...node.getElementsByTagNameNS('*',name)]
+const parseXML = source => {
+  const xml=new DOMParser().parseFromString(source,'application/xml')
+  if(xmlElements(xml,'parsererror').length)throw Error('Ungültiger XML-Inhalt in der Word-Datei.')
+  return xml
+}
+const inkPoints = trace => {
+  const values=[],differences=[],modes=[],points=[]
+  for(const sample of trace.trim().split(',')) {
+    const tokens=[...sample.matchAll(/([!'"]?)([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)/g)]
+    if(tokens.length<2)continue
+    tokens.forEach((token,i)=>{
+      if(token[1])modes[i]=token[1]
+      const n=Number(token[2]),old=values[i]||0
+      if(modes[i]==="'"){differences[i]=n;values[i]=old+n}
+      else if(modes[i]==='"'){differences[i]=(differences[i]||0)+n;values[i]=old+differences[i]}
+      else{values[i]=n;differences[i]=n-old}
+    })
+    if(!Number.isFinite(values[0]) || !Number.isFinite(values[1]))throw Error('Ungültige Freihandkoordinaten.')
+    points.push([values[0],values[1]])
+  }
+  return points
+}
+const inkGroupSVG = async (group,zip,relationships,folder) => {
+  const transform=xmlElements(group,'grpSpPr')[0],size=transform && xmlElements(transform,'chExt')[0]
+  const width=Number(size?.getAttribute('cx')),height=Number(size?.getAttribute('cy'))
+  if(!(width>0 && height>0))throw Error('Freihandgruppe ohne gültige Größe.')
+  const paths=[]
+  for(const part of xmlElements(group,'contentPart')) {
+    const rid=part.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id')
+    const rel=relationships.get(rid)
+    if(!rel || rel.getAttribute('TargetMode')==='External')throw Error('Freihanddaten fehlen.')
+    const resolved=new URL(rel.getAttribute('Target'),'https://docx.invalid/'+folder+'/').pathname.slice(1)
+    const file=zip.file(resolved)
+    if(!file)throw Error('Freihanddaten fehlen.')
+    const ink=parseXML(await file.async('string'))
+    const xf=xmlElements(part,'xfrm')[0],off=xf && xmlElements(xf,'off')[0],ext=xf && xmlElements(xf,'ext')[0]
+    const x=Number(off?.getAttribute('x')),y=Number(off?.getAttribute('y')),w=Number(ext?.getAttribute('cx')),h=Number(ext?.getAttribute('cy'))
+    if(![x,y,w,h].every(Number.isFinite))throw Error('Ungültige Zeichnungsposition.')
+    const strokes=xmlElements(ink,'trace').map(t=>inkPoints(t.textContent)).filter(p=>p.length)
+    const all=strokes.flat();if(!all.length)continue
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity
+    for(const [px,py] of all){minX=Math.min(minX,px);minY=Math.min(minY,py);maxX=Math.max(maxX,px);maxY=Math.max(maxY,py)}
+    const brush=new Map(xmlElements(ink,'brushProperty').map(p=>[p.getAttribute('name'),p.getAttribute('value')]))
+    const color=/^#[a-f\d]{6}$/i.test(brush.get('color')||'')?brush.get('color'):'#000000'
+    const strokeWidth=Math.max(360,Math.min(width/5,(Number(brush.get('width'))||.035)*360000))
+    const padX=Math.min(w/2,strokeWidth/2),padY=Math.min(h/2,strokeWidth/2)
+    for(const points of strokes) {
+      const d=points.map(([px,py],i)=>(i?'L':'M')+(x+padX+(px-minX)/Math.max(1,maxX-minX)*Math.max(0,w-2*padX)).toFixed(1)+' '+(y+padY+(py-minY)/Math.max(1,maxY-minY)*Math.max(0,h-2*padY)).toFixed(1)).join(' ')
+      paths.push('<path d="'+d+(points.length===1?' l.1 .1':'')+'" fill="none" stroke="'+color+'" stroke-width="'+strokeWidth+'" stroke-linecap="round" stroke-linejoin="round"/>')
+    }
+  }
+  if(!paths.length)throw Error('Freihandgruppe enthält keine darstellbaren Linien.')
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+Math.ceil(width/9525)+'" height="'+Math.ceil(height/9525)+'" viewBox="0 0 '+width+' '+height+'">'+paths.join('')+'</svg>'
+}
+const prepareWordForRendering = async bytes => {
+  const zip=await JSZip.loadAsync(asArrayBuffer(bytes));let changed=0
+  const mc='http://schemas.openxmlformats.org/markup-compatibility/2006', relNS='http://schemas.openxmlformats.org/package/2006/relationships'
+  const types=parseXML(await zip.file('[Content_Types].xml').async('string'))
+  for(const filename of Object.keys(zip.files).filter(n=>/^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/.test(n))) {
+    const xml=parseXML(await zip.file(filename).async('string')),folder=filename.slice(0,filename.lastIndexOf('/')),base=filename.slice(filename.lastIndexOf('/')+1)
+    const relPath=folder+'/_rels/'+base+'.rels',relFile=zip.file(relPath)
+    if(!relFile)continue
+    const relXML=parseXML(await relFile.async('string')),relationships=new Map(xmlElements(relXML,'Relationship').map(r=>[r.getAttribute('Id'),r]))
+    let modified=false
+    for(const alternate of [...xml.getElementsByTagNameNS(mc,'AlternateContent')]) {
+      const fallback=[...alternate.children].find(n=>n.localName==='Fallback')
+      if(fallback?.firstElementChild)continue
+      const group=xmlElements(alternate,'wgp')[0]
+      if(!group)continue
+      const svg=await inkGroupSVG(group,zip,relationships,folder)
+      const id='mitschrift_ink_'+crypto.randomUUID().replaceAll('-',''),media='media/'+id+'.svg'
+      zip.file(folder+'/'+media,svg)
+      const rel=relXML.createElementNS(relNS,'Relationship');rel.setAttribute('Id',id);rel.setAttribute('Type','http://schemas.openxmlformats.org/officeDocument/2006/relationships/image');rel.setAttribute('Target',media);relXML.documentElement.append(rel)
+      const source=xmlElements(alternate,'drawing')[0],drawing=source.cloneNode(true),data=xmlElements(drawing,'graphicData')[0],extent=xmlElements(drawing,'extent')[0]
+      const cx=extent.getAttribute('cx'),cy=extent.getAttribute('cy')
+      data.setAttribute('uri','http://schemas.openxmlformats.org/drawingml/2006/picture')
+      const picture=parseXML('<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><pic:nvPicPr><pic:cNvPr id="0" name="Freihandzeichnung"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="'+id+'"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="'+Number(cx)+'" cy="'+Number(cy)+'"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>')
+      data.replaceChildren(xml.importNode(picture.documentElement,true))
+      alternate.replaceWith(drawing);changed++;modified=true
+    }
+    if(modified){zip.file(filename,new XMLSerializer().serializeToString(xml));zip.file(relPath,new XMLSerializer().serializeToString(relXML))}
+  }
+  if(!changed)return asArrayBuffer(bytes)
+  if(!xmlElements(types,'Default').some(n=>n.getAttribute('Extension')==='svg')){const item=types.createElementNS(types.documentElement.namespaceURI,'Default');item.setAttribute('Extension','svg');item.setAttribute('ContentType','image/svg+xml');types.documentElement.append(item);zip.file('[Content_Types].xml',new XMLSerializer().serializeToString(types))}
+  return zip.generateAsync({type:'arraybuffer',compression:'DEFLATE'})
+}
+
+const withDeadline = (promise, ms=25000) => {
+  let timer
+  return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Die Vorschau benötigt zu lange.')),ms)})]).finally(()=>clearTimeout(timer))
+}
+const fallbackBanner = text => {
+  const banner=document.createElement('div');banner.dataset.previewFallback='true'
+  banner.style.cssText='padding:14px 18px;background:#fff4df;color:#604a22;font:14px/1.5 system-ui;border-bottom:1px solid #e9d7ae'
+  banner.textContent=text;return banner.outerHTML
+}
 const renderWord = async bytes => {
-  if (!window.docx || !window.DOMPurify) throw Error('DOCX-Bibliotheken konnten nicht geladen werden. Internetverbindung prüfen und neu laden.')
-  const host = document.createElement('div')
-  await window.docx.renderAsync(bytes, host, host, { inWrapper:true, useBase64URL:true, renderHeaders:true, renderFooters:true, renderFootnotes:true, renderEndnotes:true, breakPages:true, renderAltChunks:false })
-  return DOMPurify.sanitize(host.innerHTML, { ADD_TAGS:['style'], FORBID_TAGS:['script','iframe','object','embed','form','input'], FORBID_ATTR:['srcset'] })
+  if(!window.DOMPurify)throw Error('Darstellungsbibliothek nicht geladen. Bitte die Seite neu laden.')
+  try {
+    if(!window.docx)throw Error('Layout-Renderer nicht geladen.')
+    const body=document.createElement('div'),styles=document.createElement('div')
+    const renderBytes=await prepareWordForRendering(bytes)
+    await withDeadline(window.docx.renderAsync(renderBytes,body,styles,{
+      inWrapper:true,useBase64URL:true,renderHeaders:true,renderFooters:true,
+      renderFootnotes:true,renderEndnotes:true,breakPages:true,renderAltChunks:false
+    }))
+    for(const image of body.querySelectorAll('img')){
+      if(image.src.startsWith('data:') && image.src.includes(';base64,')){
+        const data=image.src.split(';base64,')[1]
+        if(atob(data.slice(0,80)).trimStart().startsWith('<svg'))image.src='data:image/svg+xml;base64,'+data
+      }
+    }
+    if(!body.querySelector('section.docx'))throw Error('Keine Dokumentseiten erzeugt.')
+    return DOMPurify.sanitize(styles.innerHTML+body.innerHTML,{
+      ADD_TAGS:['style'],FORBID_TAGS:['script','iframe','object','embed','form','input'],FORBID_ATTR:['srcset']
+    })
+  }catch(layoutError) {
+    console.warn('Word-Layoutvorschau fehlgeschlagen:',layoutError)
+    try {
+      if(!window.mammoth)throw Error('Textkonverter nicht geladen.')
+      const converted=await withDeadline(window.mammoth.convertToHtml({arrayBuffer:asArrayBuffer(bytes)}))
+      if(!converted.value.trim())throw Error('Keine Ersatzdarstellung verfügbar.')
+      const safe=DOMPurify.sanitize(converted.value,{FORBID_TAGS:['script','iframe','object','embed','form','input','style']})
+      return fallbackBanner('Vereinfachte Darstellung: Das Word-Layout konnte nicht geladen werden. Text und unterstützte Bilder werden angezeigt; Formatierungen und besondere Objekte können fehlen. Das Original bleibt vollständig erhalten.')+
+        '<div style="padding:24px;font:16px/1.6 Georgia;overflow-wrap:anywhere"><style>img{max-width:100%;height:auto}table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #ccc;padding:6px}</style>'+safe+'</div>'
+    }catch(textError) {
+      console.warn('Word-Ersatzdarstellung fehlgeschlagen:',textError)
+      return fallbackBanner('Für diese Datei ist keine Browser-Vorschau verfügbar. Du kannst sie trotzdem als Dokumentblock einfügen und das unveränderte Word-Original herunterladen.')
+    }
+  }
 }
 const rendered = new Map()
 const BlockEmbed = Quill.import('blots/block/embed')
@@ -349,7 +476,7 @@ async function prepareImport(file) {
     if(generation!==importGeneration) return
     const frame=document.createElement('iframe'); frame.title='Word-Importvorschau'; frame.setAttribute('sandbox','allow-same-origin'); frame.style='width:100%;height:420px;border:0';frame.srcdoc=frameDocument(markup)
     document.getElementById('preview').replaceChildren(frame)
-    document.getElementById('importWarnings').textContent=special?'Dieses Dokument enthält spezielle Word-Objekte. Bitte die Vorschau vor dem Import prüfen.':''
+    document.getElementById('importWarnings').textContent=markup.includes('data-preview-fallback')?'Die Layoutvorschau ist fehlgeschlagen. Der Import bleibt möglich; die Ersatzdarstellung ist nicht layoutgetreu.':special?'Dieses Dokument enthält spezielle Word-Objekte. Bitte die Vorschau vor dem Import prüfen.':''
     pending={bytes,name:file.name,markup};refreshConnection()
   } catch(e) { if(generation===importGeneration) document.getElementById('preview').textContent='Import fehlgeschlagen: '+e.message }
 }
@@ -371,10 +498,11 @@ confirm.onclick=async()=>{
         quill.insertEmbed(at,'wordDocument',{id},'user');quill.insertText(at+1,'\n','user')
       })
       quill.setSelection(at+2,0,'silent')
-      notice('Word-Dokument mit Layout eingefügt. Du kannst vor und nach dem Dokumentblock weiterschreiben.')
+      notice(item.markup.includes('data-preview-fallback')?'Word-Original als Dokumentblock eingefügt. Die Browserdarstellung ist vereinfacht oder nicht verfügbar.':'Word-Dokument mit Layout eingefügt. Du kannst vor und nach dem Dokumentblock weiterschreiben.')
     } else {
       if(!window.mammoth) throw Error('Textimport-Bibliothek nicht geladen.')
-      const result=await mammoth.convertToHtml({arrayBuffer:item.bytes})
+      const editableBytes=await prepareWordForRendering(item.bytes)
+      const result=await withDeadline(mammoth.convertToHtml({arrayBuffer:editableBytes}))
       if(epoch!==connectionEpoch || !requireLive())throw Error('Verbindung unterbrochen. Bitte Import erneut bestätigen.')
       const html=DOMPurify.sanitize(result.value,{FORBID_TAGS:['iframe','object','embed','style']})
       const delta=quill.clipboard.convert({html})
@@ -383,7 +511,7 @@ confirm.onclick=async()=>{
       notice('Bearbeitbaren Inhalt eingefügt. Tabellen und Word-Spezialformatierungen können vereinfacht sein.'+(result.messages.length?' '+result.messages.length+' Importhinweis(e): '+result.messages.slice(0,3).map(m=>m.message).join(' · '):''))
     }
     quill.getModule('history').cutoff(); dialog.close()
-  } catch(e) { document.getElementById('importWarnings').textContent=e.message;refreshConnection() }
+  } catch(e) { document.getElementById('importWarnings').textContent='Dieser Importmodus konnte die Datei nicht verarbeiten. Du kannst stattdessen das Word-Original als Dokumentblock einfügen. Details: '+e.message;refreshConnection() }
 }
 document.getElementById('restore').onclick=()=>document.getElementById('restoreInput').click()
 document.getElementById('restoreInput').onchange=async e=>{
