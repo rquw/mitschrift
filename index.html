@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mitschrift</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.6/dist/docx-preview.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.9.0/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
 <script type="importmap">
 { "imports": {
   "yjs": "https://esm.sh/yjs@13.6.20",
@@ -36,6 +40,40 @@
   @media (max-width:600px){ .ql-editor { padding:20px 16px; min-height:80vh; } #paper { background-image:none; } }
   @page { size:A4; margin:0; }
   @media print { .top { display:none; } body { background:#fff; } .wrap { padding:0; } #paper { box-shadow:none; background-image:none; } .ql-cursors { display:none; } }
+
+  .top { background:#f5f5f7ed; backdrop-filter:blur(16px); border-bottom:1px solid #ddd; padding:14px 20px; }
+  header { max-width:1100px; margin:0 auto 12px; flex-wrap:wrap; }
+  header b { font-size:20px; letter-spacing:-.7px; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; max-width:1100px; margin:0 auto 12px; align-items:center; }
+  .action { border:1px solid #d9dbe2; border-radius:8px; padding:8px 12px; background:white; color:#272b36; cursor:pointer; font:500 13px system-ui; }
+  .primary { background:#3e53cf; border-color:#3e53cf; color:white; }
+  .action:hover { filter:brightness(.95); } .action:disabled { opacity:.5; cursor:wait; }
+  #notice { max-width:1100px; margin:8px auto; font:13px/1.5 system-ui; color:#4b5265; }
+  .wrap { padding-top:28px; } #paper { border-radius:3px; }
+  dialog { width:min(960px,94vw); max-height:90vh; border:1px solid #ddd; border-radius:16px; padding:24px; box-shadow:0 20px 90px #0003; }
+  dialog::backdrop { background:#17203570; backdrop-filter:blur(4px); }
+  dialog h2 { margin:0 0 10px; font-size:22px; } dialog p { font:14px/1.6 system-ui; color:#555; }
+  .options { display:flex; flex-wrap:wrap; gap:16px; margin:16px 0; } .options label { flex:1; min-width:210px; border:1px solid #d9dbe2; padding:16px; border-radius:10px; cursor:pointer; }
+  .options small { display:block; line-height:1.5; margin-top:8px; color:#666; }
+  #preview { background:#eceef2; max-height:48vh; overflow:auto; border-radius:8px; margin:14px 0; }
+  #preview .docx-wrapper { padding:18px; } #preview .docx { margin-bottom:18px; }
+  .docx-card { border:1px solid #d9dbe2; border-radius:8px; margin:14px 0; white-space:normal; overflow:hidden; }
+  .docx-label { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:10px; background:#f4f5f9; font:12px system-ui; }
+  .docx-label span { flex:1; overflow-wrap:anywhere; } .docx-view { display:block; width:100%; border:0; height:350px; background:white; }
+  .ql-editor .docx-card { cursor:default; } .ql-editor { overflow:visible; }
+  #stats { margin-left:auto; font:12px system-ui; color:#737887; }
+  @media print { .actions, #notice, .docx-label { display:none!important; } .docx-card { border:0; } }
+
+  #connection { max-width:1100px; margin:0 auto 12px; padding:12px 14px; border:1px solid #dedfea; background:#eef0fa; border-radius:10px; display:flex; align-items:center; gap:12px; }
+  #connection[data-state="live"] { background:#edf7f1; border-color:#c8e4d2; }
+  #connection[data-state="offline"], #connection[data-state="error"] { background:#fff5e9; border-color:#ecd7bb; }
+  #connection strong { display:block; font-size:13px; } #connection small { display:block; color:#626879; margin-top:3px; line-height:1.4; }
+  #connection .connection-copy { flex:1; } #people { display:flex; gap:6px; max-width:1100px; margin:0 auto 10px; flex-wrap:wrap; }
+  .person { border:1px solid #ddd; border-left:3px solid var(--person); background:white; padding:4px 9px; border-radius:20px; font-size:12px; }
+  #tb[aria-disabled="true"] { opacity:.45; pointer-events:none; }
+  .ql-disabled .ql-editor { cursor:default; } #paper[data-locked="true"] { outline:1px solid #e2d6c2; }
+  .action:disabled { cursor:not-allowed; } #retry { white-space:nowrap; }
+  @media print { #connection, #people { display:none!important; } }
 </style>
 </head>
 <body>
@@ -47,6 +85,18 @@
       &nbsp;<span id="dot"></span><span id="peers">verbinde…</span>
     </span>
   </header>
+  <div id="connection" data-state="connecting" role="status" aria-live="polite">
+    <div class="connection-copy"><strong id="connectionTitle">Verbindung wird aufgebaut</strong><small id="connectionDetail">Nur Lesen, bis Live-Verbindung und Dokument synchronisiert sind.</small></div>
+    <button class="action" id="retry">Erneut verbinden</button>
+  </div><div id="people" aria-label="Anwesende Personen"></div>
+  <div class="actions">
+    <button class="action primary" id="importDocx">Word-Datei importieren</button>
+    <button class="action" id="undo">Rückgängig</button><button class="action" id="redo">Wiederholen</button>
+    <button class="action" id="backup">Sicherung herunterladen</button><button class="action" id="restore">Sicherung laden</button><input id="restoreInput" type="file" accept=".json" hidden><button class="action" id="print">Drucken / PDF</button>
+    <span id="stats">0 Wörter</span>
+  </div>
+  <input type="file" id="docxInput" accept=".docx" hidden>
+  <div id="notice" role="status" aria-live="polite">Word-Dateien lassen sich auch direkt hierher ziehen.</div>
   <div id="tb">
     <select class="ql-header"><option value="1"></option><option value="2"></option><option value="3"></option><option selected></option></select>
     <select class="ql-size"><option value="small"></option><option selected></option><option value="large"></option><option value="huge"></option></select>
@@ -63,6 +113,22 @@
 </div>
 <div class="wrap"><div id="paper"><div id="ed"></div></div></div>
 
+<dialog id="importDialog">
+  <h2>Word-Datei übernehmen</h2><p id="fileInfo"></p>
+  <div class="options">
+    <label><input type="radio" name="importMode" value="layout" checked> <b>Layout erhalten</b><small>Als Dokumentblock mit Bildern, Tabellen, Schriftarten und Seitenlayout. Text innerhalb des Blocks ist nicht bearbeitbar. Darunter kannst du weiterschreiben.</small></label>
+    <label><input type="radio" name="importMode" value="edit"> <b>Text weiterbearbeiten</b><small>Text, Überschriften, Listen, Links und Bilder im Editor bearbeiten. Tabellen, Seitenlayout und spezielle Formatierungen werden vereinfacht.</small></label>
+  </div>
+  <p>Die Vorschau ist eine Browserdarstellung. SmartArt, Diagramme, Formeln, Textfelder und fehlende Schriftarten können abweichen. Das Word-Original bleibt im Dokumentblock unverändert erhalten.</p>
+  <div id="importWarnings" role="status"></div><div id="preview"></div>
+  <div class="actions" style="margin:16px 0 0"><button class="action" id="cancelImport">Abbrechen</button><button class="action primary" id="confirmImport" disabled>Am Cursor einfügen</button></div>
+</dialog>
+<script>
+window.mitschriftBootTimer=setTimeout(()=>{
+  if(!window.mitschriftBooted){document.getElementById('connectionTitle').textContent='Start noch nicht abgeschlossen';document.getElementById('connectionDetail').textContent='Bitte Internetverbindung prüfen und die Seite neu laden. Der Editor bleibt gesperrt.'}
+},20000);
+document.getElementById('retry').onclick=()=>location.reload();
+</script>
 <script type="module">
 import * as Y from 'yjs'
 import Quill from 'quill'
@@ -72,9 +138,60 @@ import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate, removeAwareness
 import mqtt from 'mqtt'
 
 Quill.register('modules/cursors', QuillCursors)
+const notice = message => document.getElementById('notice').textContent = message
+const download = (blob, name) => {
+  const url = URL.createObjectURL(blob), a = document.createElement('a')
+  a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000)
+}
+const frameDocument = (markup) => '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; font-src data: blob:; style-src \'unsafe-inline\';"><style>html,body{margin:0;background:white} .docx-wrapper{padding:0!important;background:white!important} section.docx{box-shadow:none!important;margin:0 auto!important} @media print{section.docx{break-after:page}}</style></head><body>' + markup + '</body></html>'
+const renderWord = async bytes => {
+  if (!window.docx || !window.DOMPurify) throw Error('DOCX-Bibliotheken konnten nicht geladen werden. Internetverbindung prüfen und neu laden.')
+  const host = document.createElement('div')
+  await window.docx.renderAsync(bytes, host, host, { inWrapper:true, useBase64URL:true, renderHeaders:true, renderFooters:true, renderFootnotes:true, renderEndnotes:true, breakPages:true, renderAltChunks:false })
+  return DOMPurify.sanitize(host.innerHTML, { ADD_TAGS:['style'], FORBID_TAGS:['script','iframe','object','embed','form','input'], FORBID_ATTR:['srcset'] })
+}
+const rendered = new Map()
+const BlockEmbed = Quill.import('blots/block/embed')
+class WordBlock extends BlockEmbed {
+  static blotName = 'wordDocument'
+  static tagName = 'div'
+  static className = 'docx-card'
+  static create(value) {
+    const node = super.create(); node.dataset.docId = value.id; node.contentEditable = 'false'
+    const bar = document.createElement('div'); bar.className = 'docx-label'
+    const label = document.createElement('span'); label.textContent = 'Word-Dokument · wird geladen…'; bar.append(label)
+    const button = document.createElement('button'); button.type='button'; button.className='action'; button.textContent='Original .docx'; bar.append(button)
+    const frame = document.createElement('iframe'); frame.className='docx-view'; frame.title='Importiertes Word-Dokument'; frame.setAttribute('sandbox','allow-same-origin')
+    node.append(bar,frame)
+    const show = async () => {
+      const asset = assets.get(value.id)
+      if (!asset) { label.textContent='Dokument wird synchronisiert…'; return }
+      label.textContent=asset.name
+      button.onclick = () => download(new Blob([fromB64(asset.data)], {type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}), asset.name)
+      try {
+        if (!rendered.has(value.id)) rendered.set(value.id,renderWord(fromB64(asset.data)))
+        const markup=await rendered.get(value.id)
+        frame.onload=()=>{
+          const resize=()=>{try { const d=frame.contentDocument; const w=d.body.scrollWidth; const scale=Math.min(1,frame.clientWidth/w); d.body.style.transformOrigin='top left'; d.body.style.transform='scale('+scale+')'; frame.style.height=Math.ceil(d.body.scrollHeight*scale+4)+'px' } catch {} }
+          resize(); frame.contentDocument?.fonts.ready.then(resize)
+          frame.contentDocument?.querySelectorAll('img').forEach(img=>img.addEventListener('load',resize))
+          const ro=new ResizeObserver(resize); ro.observe(node); node._resizeObserver=ro
+        }
+        frame.srcdoc=frameDocument(markup)
+      } catch (e) { rendered.delete(value.id); label.textContent=asset.name+' · Vorschau fehlgeschlagen; Original herunterladen.' }
+    }
+    node._assetObserver=()=>{if(assets.has(value.id)){assets.unobserve(node._assetObserver);show()}}
+    if(assets.has(value.id)) queueMicrotask(show); else assets.observe(node._assetObserver)
+    return node
+  }
+  static value(node) { return {id:node.dataset.docId} }
+  detach() { this.domNode._resizeObserver?.disconnect(); assets.unobserve(this.domNode._assetObserver); super.detach() }
+}
+Quill.register(WordBlock)
 
 const doc = new Y.Doc()
 const text = doc.getText('t')
+const assets = doc.getMap('wordAssets')
 const T = 'fabiosch/mitschrift/v3'
 const KEY = 'mitschrift-v3'
 const SB_URL='https://iringgktpsjrygqduqao.supabase.co';
@@ -85,31 +202,81 @@ const toB64 = u => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s +=
 const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
 const saveEl = document.getElementById('save')
 
-try { const s = localStorage.getItem(KEY); if (s) Y.applyUpdate(doc, fromB64(s), 'local') } catch {}
-
-const dbLoad = async () => {
-  const r = await fetch(DB + '&select=state', { headers: H, cache: 'no-store' })
-  const [row] = await r.json()
-  if (row?.state) Y.applyUpdate(doc, fromB64(row.state), 'db')
+let cacheDB
+try {
+  cacheDB = await new Promise((resolve,reject)=>{ const r=indexedDB.open('mitschrift-documents',1); r.onupgradeneeded=()=>r.result.createObjectStore('state'); r.onsuccess=()=>resolve(r.result); r.onerror=()=>reject(r.error) })
+  const state = await new Promise((resolve,reject)=>{const r=cacheDB.transaction('state').objectStore('state').get(KEY);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})
+  if(state) Y.applyUpdate(doc,new Uint8Array(state),'local')
+  const old=!state && localStorage.getItem(KEY); if(old) Y.applyUpdate(doc,fromB64(old),'local')
+} catch { notice('Lokaler Speicher nicht verfügbar. Bitte regelmäßig eine Sicherung herunterladen.') }
+const persistLocal = () => {
+  if(!cacheDB) return
+  const tx=cacheDB.transaction('state','readwrite'); tx.objectStore('state').put(Y.encodeStateAsUpdate(doc),KEY)
+  tx.onerror=()=>notice('Lokales Speichern fehlgeschlagen. Bitte eine Sicherung herunterladen.')
 }
-try { await dbLoad(); saveEl.textContent = 'gespeichert' } catch { saveEl.textContent = 'DB nicht erreichbar' }
 
-// erst den DB-Stand reinmergen, dann speichern, damit nix von anderen überschrieben wird
-let dirty = false, saving = false, saveT
+let dirty = false, saving = false, saveT, revision = 0
+let client, quill, subscribed=false, synced=false, lastEcho=0, lastDatabase=0, connectionEpoch=0
+let phase='connecting', failure='', lastSaved='', initializing=false
+const writeAllowed = (s, now=Date.now()) => s.online && s.connected && s.subscribed && s.synced && now-s.echo<10000 && now-s.database<35000
+const canEdit = () => writeAllowed({online:navigator.onLine,connected:!!client?.connected,subscribed,synced,echo:lastEcho,database:lastDatabase})
+const requireLive = () => { if(canEdit()) return true; notice('Nur Lesen: Bitte warten, bis die Verbindung wieder live und synchronisiert ist.'); refreshConnection(); return false }
+const refreshConnection = () => {
+  const live=canEdit()
+  quill?.enable(live)
+  if(quill) quill.root.setAttribute('aria-readonly',String(!live))
+  document.getElementById('paper').dataset.locked=String(!live)
+  for(const id of ['importDocx','undo','redo','restore']) document.getElementById(id).disabled=!live
+  const toolbar=document.getElementById('tb');toolbar.setAttribute('aria-disabled',String(!live));toolbar.inert=!live
+  toolbar.querySelectorAll('button,select').forEach(el=>el.disabled=!live)
+  document.getElementById('confirmImport').disabled=!live || !pending
+  const state=live?'live':!navigator.onLine?'offline':phase
+  document.getElementById('connection').dataset.state=state
+  document.getElementById('connectionTitle').textContent=live?'Live verbunden':state==='offline'?'Offline · nur Lesen':state==='syncing'?'Dokument wird synchronisiert':state==='error'?'Verbindung gestört · nur Lesen':'Verbindung wird aufgebaut'
+  document.getElementById('connectionDetail').textContent=live?'Änderungen werden live geteilt und automatisch gespeichert.':failure || 'Bearbeiten ist gesperrt, bis Live-Verbindung und gemeinsamer Dokumentstand bestätigt sind.'
+  document.getElementById('dot').className=live?'on':''
+  document.getElementById('retry').hidden=live
+  saveEl.textContent=saving?'Speichert…':dirty?'Änderungen noch nicht bestätigt':lastSaved?'Gespeichert um '+lastSaved:'Dokument wird geladen…'
+}
+const lockConnection = (message, next='error') => {
+  synced=false;phase=next;failure=message;connectionEpoch++;refreshConnection()
+}
+const dbLoad = async () => {
+  const r=await fetch(DB+'&select=state,updated_at',{headers:H,cache:'no-store',signal:AbortSignal.timeout(10000)})
+  if(!r.ok) throw Error('Dokumentspeicher antwortet nicht ('+r.status+').')
+  const rows=await r.json()
+  if(!Array.isArray(rows) || rows.length!==1) throw Error('Das gemeinsame Dokument fehlt oder ist nicht zugänglich.')
+  const row=rows[0]
+  if(row.state) Y.applyUpdate(doc,fromB64(row.state),'db')
+  lastDatabase=Date.now()
+  return row
+}
 const dbSave = async () => {
-  if (saving) { saveT = setTimeout(dbSave, 500); return }
-  saving = true; dirty = false
+  if(saving || !navigator.onLine || !client?.connected || !subscribed) return false
+  saving=true;refreshConnection()
   try {
-    await dbLoad()
-    const r = await fetch(DB, { method: 'PATCH', headers: H, body: JSON.stringify({ state: toB64(Y.encodeStateAsUpdate(doc)), updated_at: new Date().toISOString() }) })
-    if (!r.ok) throw 0
-    saveEl.textContent = dirty ? 'speichert…' : 'gespeichert'
-  } catch { dirty = true; saveEl.textContent = 'Speichern fehlgeschlagen, versuch nochmal…'; saveT = setTimeout(dbSave, 3000) }
-  saving = false
+    for(let attempt=0;attempt<5;attempt++) {
+      const row=await dbLoad(), savedRevision=revision
+      const stamp=new Date(Math.max(Date.now(),(Date.parse(row.updated_at)||0)+1)).toISOString()
+      const filter=row.updated_at==null?'is.null':'eq.'+encodeURIComponent(row.updated_at)
+      const r=await fetch(DB+'&updated_at='+filter+'&select=updated_at',{
+        method:'PATCH',signal:AbortSignal.timeout(12000),headers:{...H,Prefer:'return=representation'},
+        body:JSON.stringify({state:toB64(Y.encodeStateAsUpdate(doc)),updated_at:stamp})
+      })
+      if(!r.ok) throw Error('Speichern fehlgeschlagen ('+r.status+').')
+      const changed=await r.json()
+      if(!Array.isArray(changed)) throw Error('Ungültige Speicherbestätigung.')
+      if(!changed.length) continue
+      dirty=revision!==savedRevision;lastDatabase=Date.now();lastSaved=new Date().toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'})
+      return true
+    }
+    throw Error('Viele gleichzeitige Änderungen. Synchronisierung wird wiederholt.')
+  } catch(e) { dirty=true;lockConnection(e.message+' Deine bisherigen Änderungen bleiben lokal erhalten.');return false }
+  finally {saving=false;refreshConnection();if(dirty){clearTimeout(saveT);saveT=setTimeout(()=>dbSave(),4000)}}
 }
 
 // Bilder verkleinern, sonst wird das Dokument für den Relay zu fett
-const shrink = file => new Promise(res => {
+const shrink = file => new Promise((res,reject) => {
   const img = new Image()
   img.onload = () => {
     const k = Math.min(1, 1000 / Math.max(img.width, img.height))
@@ -117,25 +284,31 @@ const shrink = file => new Promise(res => {
     c.width = Math.round(img.width * k); c.height = Math.round(img.height * k)
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
     URL.revokeObjectURL(img.src)
-    res(c.toDataURL('image/jpeg', 0.7))
+    res(c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.85))
   }
+  img.onerror = () => { URL.revokeObjectURL(img.src); reject(Error('Bild konnte nicht gelesen werden.')) }
   img.src = URL.createObjectURL(file)
 })
 
-const quill = new Quill('#ed', {
+quill = new Quill('#ed', {
+  readOnly: true,
   theme: 'snow',
   placeholder: 'Einfach losschreiben…',
   modules: { toolbar: '#tb', cursors: true, history: { userOnly: true } }
 })
 
 const insertImage = async file => {
-  const url = await shrink(file)
-  const r = quill.getSelection(true)
+  if(!requireLive())return
+  const epoch=connectionEpoch
+  let url; try { url = await shrink(file) } catch(e) { notice(e.message); return }
+  if(epoch!==connectionEpoch || !requireLive())return
+  const r = quill.getSelection(true) || {index:quill.getLength()-1}
   quill.insertEmbed(r.index, 'image', url, 'user')
   quill.setSelection(r.index + 1, 0, 'user')
 }
 
 quill.getModule('toolbar').addHandler('image', () => {
+  if(!requireLive())return
   const inp = document.createElement('input')
   inp.type = 'file'; inp.accept = 'image/*'
   inp.onchange = () => inp.files[0] && insertImage(inp.files[0])
@@ -143,18 +316,103 @@ quill.getModule('toolbar').addHandler('image', () => {
 })
 
 const grabImages = (e, files) => {
+  if(!canEdit()){e.preventDefault();e.stopImmediatePropagation();return}
+  const word = [...(files || [])].find(f => /\.docx$/i.test(f.name))
+  if(word) { e.preventDefault(); e.stopPropagation(); prepareImport(word); return }
   const imgs = [...(files || [])].filter(f => f.type.startsWith('image/'))
   if (!imgs.length) return
   e.preventDefault(); e.stopPropagation()
-  imgs.forEach(insertImage)
+  ;(async()=>{for(const file of imgs) await insertImage(file)})()
 }
 quill.root.addEventListener('paste', e => grabImages(e, e.clipboardData?.files), true)
 quill.root.addEventListener('drop', e => grabImages(e, e.dataTransfer?.files), true)
 
+const dialog=document.getElementById('importDialog'), input=document.getElementById('docxInput'), confirm=document.getElementById('confirmImport')
+let pending=null, importPosition=0, importGeneration=0
+async function prepareImport(file) {
+  if(!requireLive())return
+  if(!/\.docx$/i.test(file.name)) { notice('Bitte eine .docx-Datei auswählen.'); return }
+  if(file.size>20*1024*1024) { notice('Die Datei ist größer als 20 MB. Bitte Bilder in Word komprimieren.'); return }
+  const generation=++importGeneration
+  pending=null; confirm.disabled=true; importPosition=quill.getSelection()?.index ?? quill.getLength()-1
+  document.getElementById('fileInfo').textContent=file.name+' · '+(file.size/1024/1024).toFixed(2)+' MB'
+  document.getElementById('preview').textContent='Dokument und Bilder werden geladen…'
+  document.getElementById('importWarnings').textContent=''
+  if(!dialog.open) dialog.showModal()
+  try {
+    if(!window.JSZip) throw Error('Import-Bibliothek nicht geladen. Bitte neu laden.')
+    const bytes=await file.arrayBuffer(), zip=await JSZip.loadAsync(bytes)
+    if(!zip.file('word/document.xml')) throw Error('Keine gültige Word-Datei. Bitte als .docx speichern.')
+    const xml=await zip.file('word/document.xml').async('string')
+    const special= /<(?:\w+:)?(?:smartTag|AlternateContent|chart|oMath|pict|txbxContent)\b/.test(xml) || Object.keys(zip.files).some(n=>/^word\/(diagrams|charts)\//.test(n))
+    const markup=await renderWord(bytes)
+    if(generation!==importGeneration) return
+    const frame=document.createElement('iframe'); frame.title='Word-Importvorschau'; frame.setAttribute('sandbox','allow-same-origin'); frame.style='width:100%;height:420px;border:0';frame.srcdoc=frameDocument(markup)
+    document.getElementById('preview').replaceChildren(frame)
+    document.getElementById('importWarnings').textContent=special?'Dieses Dokument enthält spezielle Word-Objekte. Bitte die Vorschau vor dem Import prüfen.':''
+    pending={bytes,name:file.name,markup};refreshConnection()
+  } catch(e) { if(generation===importGeneration) document.getElementById('preview').textContent='Import fehlgeschlagen: '+e.message }
+}
+document.getElementById('importDocx').onclick=()=>input.click()
+input.onchange=()=>{if(input.files[0]) prepareImport(input.files[0]); input.value=''}
+document.getElementById('cancelImport').onclick=()=>dialog.close()
+dialog.addEventListener('close',()=>{importGeneration++;pending=null})
+confirm.onclick=async()=>{
+  if(!pending || !requireLive()) return
+  const epoch=connectionEpoch
+  const item=pending; confirm.disabled=true
+  try {
+    const at=Math.min(importPosition,quill.getLength()-1)
+    quill.getModule('history').cutoff()
+    if(document.querySelector('[name="importMode"]:checked').value==='layout') {
+      const id=crypto.randomUUID(); rendered.set(id,Promise.resolve(item.markup))
+      doc.transact(()=>{
+        assets.set(id,{name:item.name,data:toB64(new Uint8Array(item.bytes))})
+        quill.insertEmbed(at,'wordDocument',{id},'user');quill.insertText(at+1,'\n','user')
+      })
+      quill.setSelection(at+2,0,'silent')
+      notice('Word-Dokument mit Layout eingefügt. Du kannst vor und nach dem Dokumentblock weiterschreiben.')
+    } else {
+      if(!window.mammoth) throw Error('Textimport-Bibliothek nicht geladen.')
+      const result=await mammoth.convertToHtml({arrayBuffer:item.bytes})
+      if(epoch!==connectionEpoch || !requireLive())throw Error('Verbindung unterbrochen. Bitte Import erneut bestätigen.')
+      const html=DOMPurify.sanitize(result.value,{FORBID_TAGS:['iframe','object','embed','style']})
+      const delta=quill.clipboard.convert({html})
+      if(!delta.length()) throw Error('Kein bearbeitbarer Inhalt erkannt. Bitte Layout-Import verwenden.')
+      const Delta=Quill.import('delta');quill.updateContents(new Delta().retain(at).concat(delta),'user');quill.setSelection(at+delta.length(),0,'silent')
+      notice('Bearbeitbaren Inhalt eingefügt. Tabellen und Word-Spezialformatierungen können vereinfacht sein.'+(result.messages.length?' '+result.messages.length+' Importhinweis(e): '+result.messages.slice(0,3).map(m=>m.message).join(' · '):''))
+    }
+    quill.getModule('history').cutoff(); dialog.close()
+  } catch(e) { document.getElementById('importWarnings').textContent=e.message;refreshConnection() }
+}
+document.getElementById('restore').onclick=()=>document.getElementById('restoreInput').click()
+document.getElementById('restoreInput').onchange=async e=>{
+  if(!requireLive())return
+  const epoch=connectionEpoch
+  const file=e.target.files[0];e.target.value='';if(!file)return
+  try {
+    if(file.size>120*1024*1024)throw Error('Sicherung zu groß.')
+    const data=JSON.parse(await file.text())
+    if(data.format!=='mitschrift-yjs-v1' || typeof data.state!=='string')throw Error('Ungültige Mitschrift-Sicherung.')
+    const bytes=fromB64(data.state), probe=new Y.Doc()
+    try { Y.applyUpdate(probe,bytes) } finally { probe.destroy() }
+    if(epoch!==connectionEpoch || !requireLive())return
+    Y.applyUpdate(doc,bytes,'restore');notice('Sicherung mit der Mitschrift zusammengeführt. Neuere Änderungen bleiben erhalten.')
+  }catch(err){notice('Sicherung konnte nicht geladen werden: '+err.message)}
+}
+document.getElementById('undo').onclick=()=>{if(requireLive())quill.history.undo()}
+document.getElementById('redo').onclick=()=>{if(requireLive())quill.history.redo()}
+document.getElementById('print').onclick=()=>window.print()
+document.getElementById('backup').onclick=()=>download(new Blob([JSON.stringify({format:'mitschrift-yjs-v1',state:toB64(Y.encodeStateAsUpdate(doc))})],{type:'application/json'}),'Mitschrift-Sicherung.json')
+const updateStats=()=>{const t=quill.getText().trim();document.getElementById('stats').textContent=(t?t.split(/\s+/).length:0)+' Wörter · '+assets.size+' Word-Datei(en)'}
+quill.on('text-change',updateStats); assets.observe(updateStats);updateStats()
+document.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')) e.preventDefault()})
+document.addEventListener('drop',e=>{const file=[...e.dataTransfer.files].find(f=>/\.docx$/i.test(f.name));if(file){e.preventDefault();prepareImport(file)}})
+
 const awareness = new Awareness(doc)
 const colors = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#0aa5a5', '#d62fa0', '#8a6d00']
 const nameIn = document.getElementById('name')
-nameIn.value = localStorage.getItem('mitschrift-name') || ''
+try { nameIn.value = localStorage.getItem('mitschrift-name') || '' } catch {}
 const setUser = () => awareness.setLocalStateField('user', {
   name: nameIn.value.trim() || 'Anonym',
   color: colors[doc.clientID % colors.length]
@@ -164,57 +422,179 @@ nameIn.addEventListener('input', () => { try { localStorage.setItem('mitschrift-
 
 new QuillBinding(text, quill, awareness)
 
-const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'ms_' + doc.clientID + '_' + Date.now(), reconnectPeriod: 2000 })
-
-let localT
-const pushState = origin => {
-  clearTimeout(localT)
-  localT = setTimeout(() => { try { localStorage.setItem(KEY, toB64(Y.encodeStateAsUpdate(doc))) } catch {} }, 1000)
-  if (origin === 'db' || origin === 'remote') return
-  dirty = true
-  saveEl.textContent = 'speichert…'
-  clearTimeout(saveT)
-  saveT = setTimeout(dbSave, 1500)
+const incoming=new Map(), pings=new Map(), completed=new Map()
+let heartbeatBusy=false, syncRound=null, retryTimer, localT, probeTimer
+const controlTopic=T+'/control-v5'
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))
+const publish = (topic, payload, qos=1) => new Promise((resolve,reject)=>{
+  if(!client?.connected || !subscribed) {reject(Error('Live-Verbindung unterbrochen.'));return}
+  const timer=setTimeout(()=>reject(Error('Live-Bestätigung ausgeblieben.')),10000)
+  client.publish(topic,payload,{qos},err=>{clearTimeout(timer);err?reject(err):resolve()})
+})
+const sendUpdate = async (bytes, extra={}) => {
+  const epoch=connectionEpoch, encoded=toB64(bytes),id=doc.clientID+'-'+crypto.randomUUID(),chunk=48000,count=Math.ceil(encoded.length/chunk)
+  for(let i=0;i<count;i++) {
+    if(epoch!==connectionEpoch)throw Error('Verbindung während der Übertragung geändert.')
+    await publish(T+'/u',JSON.stringify({v:4,id,i,count,data:encoded.slice(i*chunk,(i+1)*chunk),sender:doc.clientID,...extra}))
+  }
 }
-
-const show = () => {
-  const n = awareness.getStates().size
-  document.getElementById('dot').className = client.connected ? 'on' : ''
-  document.getElementById('peers').textContent = !client.connected ? 'offline' : n > 1 ? `${n} online` : 'nur du'
+const sendAwareness = ids => {
+  if(client?.connected && subscribed) publish(T+'/a',encodeAwarenessUpdate(awareness,ids),0).catch(()=>{})
 }
-const sendAwareness = ids => { if (client.connected) client.publish(T + '/a', encodeAwarenessUpdate(awareness, ids)) }
-
-client.on('connect', () => {
-  client.subscribe([T + '/u', T + '/a'])
-  client.publish(T + '/u', Y.encodeStateAsUpdate(doc))
+const heartbeat = () => new Promise((resolve,reject)=>{
+  const id=crypto.randomUUID(),started=Date.now(),epoch=connectionEpoch
+  const timer=setTimeout(()=>{pings.delete(id);reject(Error('Live-Verbindung antwortet nicht.'))},7000)
+  pings.set(id,{resolve:()=>{clearTimeout(timer);if(epoch===connectionEpoch){lastEcho=Date.now();resolve(Date.now()-started)}else reject(Error('Verbindung geändert.'))},reject,timer})
+  publish(controlTopic,JSON.stringify({type:'ping',id,from:doc.clientID})).catch(err=>{clearTimeout(timer);pings.delete(id);reject(err)})
+})
+const showPeople = () => {
+  const host=document.getElementById('people');host.replaceChildren()
+  const online=client?.connected && subscribed && Date.now()-lastEcho<10000
+  document.getElementById('peers').textContent=canEdit()?'live · '+awareness.getStates().size+' online':'nur Lesen'
+  if(!online)return
+  for(const [id,state] of awareness.getStates()) {
+    const tag=document.createElement('span');tag.className='person';tag.textContent=(state.user?.name || 'Anonym')+(id===doc.clientID?' · du':'')
+    tag.style.setProperty('--person',/^#[0-9a-f]{6}$/i.test(state.user?.color || '')?state.user.color:'#777777');host.append(tag)
+  }
+}
+const syncPeers = async epoch => {
+  const token=crypto.randomUUID(),round={token,replies:new Set()};syncRound=round
   sendAwareness([doc.clientID])
-  show()
-})
-client.on('close', show)
-
-client.on('message', (topic, msg) => {
-  if (!msg.length) return
+  await publish(controlTopic,JSON.stringify({type:'sync',from:doc.clientID,token,vector:toB64(Y.encodeStateVector(doc))}))
+  await pause(1000)
+  const deadline=Date.now()+20000
+  while(true) {
+    if(epoch!==connectionEpoch)throw Error('Synchronisierung unterbrochen.')
+    const peers=[...awareness.getStates().keys()].filter(id=>id!==doc.clientID)
+    if(peers.every(id=>round.replies.has(id)) && !incoming.size)break
+    if(Date.now()>deadline)throw Error('Ein Teilnehmer antwortet noch nicht. Synchronisierung wird erneut versucht.')
+    await pause(100)
+  }
+  if(syncRound===round)syncRound=null
+}
+const synchronize = async () => {
+  if(initializing || !client?.connected || !subscribed || !navigator.onLine)return
+  initializing=true;synced=false;phase='syncing';failure='';const epoch=connectionEpoch;refreshConnection()
   try {
-    if (topic === T + '/a') applyAwarenessUpdate(awareness, new Uint8Array(msg), 'remote')
-    else Y.applyUpdate(doc, new Uint8Array(msg), 'remote')
-  } catch {}
+    await heartbeat()
+    await dbLoad()
+    await syncPeers(epoch)
+    await sendUpdate(Y.encodeStateAsUpdate(doc))
+    if(!await dbSave())throw Error('Dokument konnte noch nicht sicher gespeichert werden.')
+    await heartbeat()
+    if(epoch!==connectionEpoch) return
+    synced=true;phase='live';failure='';persistLocal();refreshConnection();showPeople()
+  }catch(e){if(epoch===connectionEpoch)lockConnection(e.message)}
+  finally {initializing=false;syncRound=null;if(!canEdit())scheduleRetry()}
+}
+function scheduleRetry() {
+  clearTimeout(retryTimer);retryTimer=setTimeout(()=>{
+    if(!navigator.onLine){scheduleRetry();return}
+    if(client?.connected && subscribed)synchronize();else if(client && !client.reconnecting)client.reconnect()
+  },4000+Math.random()*1500)
+}
+const lost = message => {
+  subscribed=false;lastEcho=0;incoming.clear();lockConnection(message,navigator.onLine?'connecting':'offline')
+  for(const p of pings.values()){clearTimeout(p.timer);p.reject(Error(message))}pings.clear()
+  const others=[...awareness.getStates().keys()].filter(id=>id!==doc.clientID)
+  removeAwarenessStates(awareness,others,'disconnect');showPeople();scheduleRetry()
+}
+client=mqtt.connect('wss://broker.hivemq.com:8884/mqtt',{
+  clientId:'ms_'+doc.clientID+'_'+Date.now(),reconnectPeriod:2500,connectTimeout:10000,keepalive:10,clean:true,resubscribe:false,queueQoSZero:false
 })
-
-awareness.on('update', ({ added, updated, removed }, origin) => {
-  if (origin === 'remote') { if (added.length) sendAwareness([doc.clientID]) }
-  else sendAwareness([...added, ...updated, ...removed])
-  show()
+client.on('connect',()=>{
+  connectionEpoch++;synced=false;subscribed=false;phase='syncing';failure='';refreshConnection()
+  client.subscribe([T+'/u',T+'/a',controlTopic],{qos:1},(err,granted)=>{
+    if(err || granted?.length!==3 || granted.some(g=>g.qos===128)){lost('Live-Kanal konnte nicht abonniert werden.');client.reconnect();return}
+    subscribed=true;sendAwareness([doc.clientID]);synchronize()
+  })
 })
-
-doc.on('update', (u, origin) => {
-  if (origin !== 'remote' && origin !== 'local' && origin !== 'db' && client.connected) client.publish(T + '/u', u)
-  pushState(origin)
+client.on('close',()=>lost('Verbindung unterbrochen. Wiederverbindung läuft automatisch.'))
+client.on('offline',()=>lost('Live-Dienst nicht erreichbar. Deine Mitschrift bleibt lesbar.'))
+client.on('error',()=>{lockConnection('Live-Verbindung gestört. Wiederverbindung läuft automatisch.');scheduleRetry()})
+client.on('message',(topic,msg)=>{
+  if(!msg.length)return
+  try {
+    if(topic===T+'/a') {applyAwarenessUpdate(awareness,new Uint8Array(msg),'remote');return}
+    if(topic===controlTopic) {
+      const p=JSON.parse(new TextDecoder().decode(msg))
+      if(p.type==='ping' && p.from===doc.clientID && pings.has(p.id)){const ping=pings.get(p.id);pings.delete(p.id);ping.resolve();return}
+      if(p.type==='sync' && Number.isInteger(p.from) && p.from!==doc.clientID && typeof p.token==='string' && typeof p.vector==='string' && p.vector.length<1000000) {
+        sendAwareness([doc.clientID])
+        sendUpdate(Y.encodeStateAsUpdate(doc,fromB64(p.vector)),{to:p.from,token:p.token}).catch(()=>{})
+      }
+      return
+    }
+    if(msg[0]!==123){Y.applyUpdate(doc,new Uint8Array(msg),'remote');return}
+    const p=JSON.parse(new TextDecoder().decode(msg))
+    if(p.to!=null && p.to!==doc.clientID)return
+    if(p.sender===doc.clientID || completed.has(p.id))return
+    if(p.v!==4 || typeof p.id!=='string' || !Number.isInteger(p.count) || p.count<1 || p.count>2000 || !Number.isInteger(p.i) || p.i<0 || p.i>=p.count || typeof p.data!=='string' || p.data.length>48000)return
+    if(!incoming.has(p.id)) {
+      if(incoming.size>=8)throw Error('Zu viele gleichzeitige Übertragungen.')
+      incoming.set(p.id,{parts:new Map(),count:p.count,time:Date.now(),sender:p.sender,token:p.token})
+    }
+    const bundle=incoming.get(p.id)
+    if(bundle.count!==p.count || bundle.sender!==p.sender || bundle.token!==p.token)return
+    bundle.parts.set(p.i,p.data)
+    if(bundle.parts.size===bundle.count) {
+      incoming.delete(p.id)
+      Y.applyUpdate(doc,fromB64(Array.from({length:p.count},(_,i)=>bundle.parts.get(i)).join('')),'remote')
+      completed.set(p.id,Date.now())
+      if(syncRound?.token===p.token)syncRound.replies.add(p.sender)
+    }
+  }catch(e){lockConnection('Übertragung unvollständig. Das Dokument wird neu synchronisiert.');scheduleRetry()}
 })
-
-addEventListener('beforeunload', e => {
-  removeAwarenessStates(awareness, [doc.clientID], 'unload')
-  if (dirty) { dbSave(); e.preventDefault() }
+awareness.on('update',({added,updated,removed},origin)=>{
+  if(origin==='remote'){if(added.length)sendAwareness([doc.clientID])}
+  else if(origin!=='disconnect')sendAwareness([...added,...updated,...removed])
+  showPeople()
 })
+doc.on('update',(u,origin)=>{
+  clearTimeout(localT);localT=setTimeout(persistLocal,300)
+  if(origin==='db' || origin==='local')return
+  dirty=true;revision++;refreshConnection()
+  if(origin!=='remote' && client.connected && subscribed)sendUpdate(u).catch(()=>{lockConnection('Änderung noch nicht live bestätigt. Synchronisierung läuft erneut.');scheduleRetry()})
+  clearTimeout(saveT);saveT=setTimeout(()=>dbSave(),1200)
+})
+for(const event of ['beforeinput','paste','cut','drop','keydown','compositionstart']) {
+  quill.root.addEventListener(event,e=>{
+    if(canEdit())return
+    const safeKey=event==='keydown' && (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown','Tab','Escape'].includes(e.key) || ((e.ctrlKey || e.metaKey) && ['c','a'].includes(e.key.toLowerCase())))
+    if(safeKey)return
+    e.preventDefault();e.stopImmediatePropagation();refreshConnection()
+  },true)
+}
+addEventListener('offline',()=>lost('Keine Internetverbindung. Bearbeiten ist bis zur Wiederverbindung gesperrt.'))
+addEventListener('online',()=>{failure='';phase='connecting';refreshConnection();if(client.connected && subscribed)synchronize();else client.reconnect()})
+document.getElementById('retry').onclick=()=>{if(initializing)return;if(client.connected && subscribed)synchronize();else client.reconnect()}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){persistLocal();return}
+  if(Date.now()-lastEcho>=10000 || Date.now()-lastDatabase>=35000){lockConnection('Verbindung wird nach der Pause geprüft.','syncing');synchronize()}
+})
+setInterval(async()=>{
+  refreshConnection();showPeople()
+  for(const [id,bundle] of incoming)if(Date.now()-bundle.time>30000){incoming.delete(id);lockConnection('Dokumentübertragung unvollständig. Neuer Abgleich läuft.');scheduleRetry()}
+  for(const [id,time] of completed)if(Date.now()-time>120000)completed.delete(id)
+  if(!client.connected || !subscribed || heartbeatBusy || initializing)return
+  if(synced && (Date.now()-lastEcho>=10000 || Date.now()-lastDatabase>=35000)) {
+    lockConnection('Verbindung wird erneut geprüft.','syncing');synchronize();return
+  }
+  if(Date.now()-lastEcho>3000) {
+    heartbeatBusy=true
+    try {await heartbeat()}catch(e){lockConnection(e.message);scheduleRetry()}finally{heartbeatBusy=false}
+  }
+},1000)
+probeTimer=setInterval(async()=>{
+  if(!canEdit() || saving)return
+  try{await dbLoad();refreshConnection()}catch(e){lockConnection(e.message);scheduleRetry()}
+},15000)
+addEventListener('beforeunload',e=>{
+  removeAwarenessStates(awareness,[doc.clientID],'unload');persistLocal()
+  if(dirty || saving){e.preventDefault();e.returnValue=''}
+})
+window.mitschriftBooted=true;clearTimeout(window.mitschriftBootTimer)
+refreshConnection();updateStats()
 </script>
 </body>
 </html>
