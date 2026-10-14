@@ -90,7 +90,7 @@
     <button class="action" id="retry">Erneut verbinden</button>
   </div><div id="people" aria-label="Anwesende Personen"></div>
   <div class="actions">
-    <button class="action primary" id="importDocx">Word-Datei importieren</button>
+    <button class="action primary" id="importDocx">Word-Datei einfügen</button><button class="action" id="convertBlocks">Word-Blöcke bearbeitbar machen</button>
     <button class="action" id="undo">Rückgängig</button><button class="action" id="redo">Wiederholen</button>
     <button class="action" id="backup">Sicherung herunterladen</button><button class="action" id="restore">Sicherung laden</button><input id="restoreInput" type="file" accept=".json" hidden><button class="action" id="print">Drucken / PDF</button>
     <span id="stats">0 Wörter</span>
@@ -115,11 +115,7 @@
 
 <dialog id="importDialog">
   <h2>Word-Datei übernehmen</h2><p id="fileInfo"></p>
-  <div class="options">
-    <label><input type="radio" name="importMode" value="layout" checked> <b>Layout erhalten</b><small>Als Dokumentblock mit Bildern, Tabellen, Schriftarten und Seitenlayout. Text innerhalb des Blocks ist nicht bearbeitbar. Darunter kannst du weiterschreiben.</small></label>
-    <label><input type="radio" name="importMode" value="edit"> <b>Text weiterbearbeiten</b><small>Text, Überschriften, Listen, Links und Bilder im Editor bearbeiten. Tabellen, Seitenlayout und spezielle Formatierungen werden vereinfacht.</small></label>
-  </div>
-  <p>Die Vorschau ist eine Browserdarstellung. SmartArt, Diagramme, Formeln, Textfelder und fehlende Schriftarten können abweichen. Das Word-Original bleibt im Dokumentblock unverändert erhalten.</p>
+  <p>Text und Bilder werden direkt in die Mitschrift eingefügt. Du kannst danach alles normal bearbeiten und löschen.</p>
   <div id="importWarnings" role="status"></div><div id="preview"></div>
   <div class="actions" style="margin:16px 0 0"><button class="action" id="cancelImport">Abbrechen</button><button class="action primary" id="confirmImport" disabled>Am Cursor einfügen</button></div>
 </dialog>
@@ -353,7 +349,7 @@ const refreshConnection = () => {
   quill?.enable(live)
   if(quill) quill.root.setAttribute('aria-readonly',String(!live))
   document.getElementById('paper').dataset.locked=String(!live)
-  for(const id of ['importDocx','undo','redo','restore']) document.getElementById(id).disabled=!live
+  for(const id of ['importDocx','undo','redo','restore','convertBlocks']) document.getElementById(id).disabled=!live
   const toolbar=document.getElementById('tb');toolbar.setAttribute('aria-disabled',String(!live));toolbar.inert=!live
   toolbar.querySelectorAll('button,select').forEach(el=>el.disabled=!live)
   document.getElementById('confirmImport').disabled=!live || !pending
@@ -454,6 +450,89 @@ const grabImages = (e, files) => {
 quill.root.addEventListener('paste', e => grabImages(e, e.clipboardData?.files), true)
 quill.root.addEventListener('drop', e => grabImages(e, e.dataTransfer?.files), true)
 
+const formulaText = node => {
+  if(node.nodeType===3)return node.textContent
+  const parts=[...node.children],tag=node.localName
+  if(tag==='mfrac')return '('+formulaText(parts[0])+')/('+formulaText(parts[1])+')'
+  if(tag==='msub' || tag==='msup'){
+    const value=formulaText(parts[1]),digits=tag==='msub'?'₀₁₂₃₄₅₆₇₈₉':'⁰¹²³⁴⁵⁶⁷⁸⁹'
+    return formulaText(parts[0])+(/^\d+$/.test(value)?[...value].map(x=>digits[+x]).join(''):(tag==='msub'?'_':'^')+'('+value+')')
+  }
+  if(tag==='msqrt')return '√('+[...node.childNodes].map(formulaText).join('')+')'
+  return [...node.childNodes].map(formulaText).join('')
+}
+const imageMime = source => {
+  if(!source?.startsWith('data:'))return source
+  const data=source.split(';base64,')[1];if(!data)return source
+  if(data.startsWith('iVBOR'))return 'data:image/png;base64,'+data
+  if(data.startsWith('/9j/'))return 'data:image/jpeg;base64,'+data
+  if(data.startsWith('R0lG'))return 'data:image/gif;base64,'+data
+  if(atob(data.slice(0,80)).trimStart().startsWith('<svg'))return 'data:image/svg+xml;base64,'+data
+  return source
+}
+const editableWordHTML = markup => {
+  const source=document.createElement('div');source.innerHTML=markup
+  if(source.querySelector('[data-preview-fallback]') && !source.querySelector('p,img,table'))throw Error('Aus dieser Datei konnten keine bearbeitbaren Inhalte gelesen werden.')
+  source.querySelectorAll('style,script,[data-preview-fallback]').forEach(n=>n.remove())
+  source.querySelectorAll('math').forEach(n=>n.replaceWith(document.createTextNode(formulaText(n))))
+  source.querySelectorAll('svg').forEach(svg=>{
+    const images=[...svg.querySelectorAll('image')]
+    if(images.length){
+      const fragment=document.createDocumentFragment()
+      images.forEach(image=>{const img=document.createElement('img');img.src=imageMime(image.getAttribute('href')||image.getAttribute('xlink:href'));fragment.append(img)})
+      svg.replaceWith(fragment)
+    }else{
+      const img=document.createElement('img');img.src='data:image/svg+xml;base64,'+toB64(new TextEncoder().encode(new XMLSerializer().serializeToString(svg)));svg.replaceWith(img)
+    }
+  })
+  const allowed=new Set(['p','br','strong','b','em','i','u','s','sub','sup','ul','ol','li','a','img','h1','h2','h3','blockquote'])
+  const copy = node => {
+    if(node.nodeType===3)return document.createTextNode(node.textContent)
+    if(node.nodeType!==1)return document.createDocumentFragment()
+    if(node.localName==='img'){
+      const image=document.createElement('img');image.src=imageMime(node.getAttribute('src'));image.alt=node.getAttribute('alt')||'';return image
+    }
+    const out=allowed.has(node.localName)?document.createElement(node.localName):node.localName==='tr'?document.createElement('p'):document.createDocumentFragment()
+    if(node.localName==='a' && /^https?:/i.test(node.getAttribute('href')||''))out.setAttribute('href',node.getAttribute('href'))
+    for(const child of node.childNodes){out.append(copy(child));if(child.nodeType===1 && ['td','th'].includes(child.localName))out.append(document.createTextNode('\t'))}
+    return out
+  }
+  const output=document.createElement('div');for(const node of source.childNodes)output.append(copy(node))
+  const images=output.querySelectorAll('img').length,characters=output.textContent.trim().length
+  if(!images && !characters)throw Error('Keine Texte oder Bilder erkannt.')
+  return {html:output.innerHTML,images,characters}
+}
+const insertEditableHTML = (html,at,remove=0) => {
+  const delta=quill.clipboard.convert({html})
+  if(!delta.length())throw Error('Kein bearbeitbarer Inhalt erkannt.')
+  const Delta=Quill.import('delta')
+  quill.getModule('history').cutoff()
+  quill.updateContents(new Delta().retain(at).delete(remove).concat(delta),'user')
+  quill.getModule('history').cutoff()
+  quill.setSelection(Math.min(at+delta.length(),quill.getLength()-1),0,'silent')
+}
+const convertExistingWordBlocks = async () => {
+  if(!requireLive())return
+  const epoch=connectionEpoch
+  const ids=quill.getContents().ops.filter(op=>op.insert?.wordDocument).map(op=>op.insert.wordDocument.id)
+  if(!ids.length){notice('Es gibt keine Word-Blöcke zum Umwandeln.');return}
+  let done=0
+  try{
+    for(const id of ids){
+      notice('Word-Block '+(done+1)+' von '+ids.length+' wird in Text und Bilder umgewandelt…')
+      const asset=assets.get(id);if(!asset)throw Error('Word-Original wird noch synchronisiert.')
+      const content=editableWordHTML(await renderWord(fromB64(asset.data)))
+      if(epoch!==connectionEpoch || !requireLive())throw Error('Verbindung unterbrochen. Bitte erneut umwandeln.')
+      let index=0,found=false
+      for(const op of quill.getContents().ops){if(op.insert?.wordDocument?.id===id){found=true;break}index+=typeof op.insert==='string'?op.insert.length:1}
+      if(found){insertEditableHTML(content.html,index,1);done++}
+    }
+    notice(done+' Word-Block/Blöcke sind jetzt normaler bearbeitbarer Text mit Bildern.')
+  }catch(e){notice('Umwandlung: '+e.message)}
+}
+
+document.getElementById('convertBlocks').onclick=convertExistingWordBlocks
+
 const dialog=document.getElementById('importDialog'), input=document.getElementById('docxInput'), confirm=document.getElementById('confirmImport')
 let pending=null, importPosition=0, importGeneration=0
 async function prepareImport(file) {
@@ -470,48 +549,26 @@ async function prepareImport(file) {
     if(!window.JSZip) throw Error('Import-Bibliothek nicht geladen. Bitte neu laden.')
     const bytes=await file.arrayBuffer(), zip=await JSZip.loadAsync(bytes)
     if(!zip.file('word/document.xml')) throw Error('Keine gültige Word-Datei. Bitte als .docx speichern.')
-    const xml=await zip.file('word/document.xml').async('string')
-    const special= /<(?:\w+:)?(?:smartTag|AlternateContent|chart|oMath|pict|txbxContent)\b/.test(xml) || Object.keys(zip.files).some(n=>/^word\/(diagrams|charts)\//.test(n))
     const markup=await renderWord(bytes)
     if(generation!==importGeneration) return
-    const frame=document.createElement('iframe'); frame.title='Word-Importvorschau'; frame.setAttribute('sandbox','allow-same-origin'); frame.style='width:100%;height:420px;border:0';frame.srcdoc=frameDocument(markup)
-    document.getElementById('preview').replaceChildren(frame)
-    document.getElementById('importWarnings').textContent=markup.includes('data-preview-fallback')?'Die Layoutvorschau ist fehlgeschlagen. Der Import bleibt möglich; die Ersatzdarstellung ist nicht layoutgetreu.':special?'Dieses Dokument enthält spezielle Word-Objekte. Bitte die Vorschau vor dem Import prüfen.':''
-    pending={bytes,name:file.name,markup};refreshConnection()
+    const content=editableWordHTML(markup)
+    document.getElementById('preview').textContent=content.characters.toLocaleString('de-AT')+' Zeichen und '+content.images+' Bilder bereit zum Einfügen.'
+    document.getElementById('importWarnings').textContent=markup.includes('data-preview-fallback')?'Einige Word-Spezialobjekte konnten nur vereinfacht übernommen werden.':''
+    pending={...content,name:file.name};refreshConnection()
   } catch(e) { if(generation===importGeneration) document.getElementById('preview').textContent='Import fehlgeschlagen: '+e.message }
 }
 document.getElementById('importDocx').onclick=()=>input.click()
 input.onchange=()=>{if(input.files[0]) prepareImport(input.files[0]); input.value=''}
 document.getElementById('cancelImport').onclick=()=>dialog.close()
 dialog.addEventListener('close',()=>{importGeneration++;pending=null})
-confirm.onclick=async()=>{
-  if(!pending || !requireLive()) return
-  const epoch=connectionEpoch
-  const item=pending; confirm.disabled=true
-  try {
-    const at=Math.min(importPosition,quill.getLength()-1)
-    quill.getModule('history').cutoff()
-    if(document.querySelector('[name="importMode"]:checked').value==='layout') {
-      const id=crypto.randomUUID(); rendered.set(id,Promise.resolve(item.markup))
-      doc.transact(()=>{
-        assets.set(id,{name:item.name,data:toB64(new Uint8Array(item.bytes))})
-        quill.insertEmbed(at,'wordDocument',{id},'user');quill.insertText(at+1,'\n','user')
-      })
-      quill.setSelection(at+2,0,'silent')
-      notice(item.markup.includes('data-preview-fallback')?'Word-Original als Dokumentblock eingefügt. Die Browserdarstellung ist vereinfacht oder nicht verfügbar.':'Word-Dokument mit Layout eingefügt. Du kannst vor und nach dem Dokumentblock weiterschreiben.')
-    } else {
-      if(!window.mammoth) throw Error('Textimport-Bibliothek nicht geladen.')
-      const editableBytes=await prepareWordForRendering(item.bytes)
-      const result=await withDeadline(mammoth.convertToHtml({arrayBuffer:editableBytes}))
-      if(epoch!==connectionEpoch || !requireLive())throw Error('Verbindung unterbrochen. Bitte Import erneut bestätigen.')
-      const html=DOMPurify.sanitize(result.value,{FORBID_TAGS:['iframe','object','embed','style']})
-      const delta=quill.clipboard.convert({html})
-      if(!delta.length()) throw Error('Kein bearbeitbarer Inhalt erkannt. Bitte Layout-Import verwenden.')
-      const Delta=Quill.import('delta');quill.updateContents(new Delta().retain(at).concat(delta),'user');quill.setSelection(at+delta.length(),0,'silent')
-      notice('Bearbeitbaren Inhalt eingefügt. Tabellen und Word-Spezialformatierungen können vereinfacht sein.'+(result.messages.length?' '+result.messages.length+' Importhinweis(e): '+result.messages.slice(0,3).map(m=>m.message).join(' · '):''))
-    }
-    quill.getModule('history').cutoff(); dialog.close()
-  } catch(e) { document.getElementById('importWarnings').textContent='Dieser Importmodus konnte die Datei nicht verarbeiten. Du kannst stattdessen das Word-Original als Dokumentblock einfügen. Details: '+e.message;refreshConnection() }
+confirm.onclick=()=>{
+  if(!pending || !requireLive())return
+  confirm.disabled=true
+  try{
+    insertEditableHTML(pending.html,Math.min(importPosition,quill.getLength()-1))
+    notice('Text und '+pending.images+' Bilder direkt eingefügt. Alles ist jetzt im Editor bearbeitbar.')
+    dialog.close()
+  }catch(e){document.getElementById('importWarnings').textContent=e.message;refreshConnection()}
 }
 document.getElementById('restore').onclick=()=>document.getElementById('restoreInput').click()
 document.getElementById('restoreInput').onchange=async e=>{
@@ -532,7 +589,7 @@ document.getElementById('undo').onclick=()=>{if(requireLive())quill.history.undo
 document.getElementById('redo').onclick=()=>{if(requireLive())quill.history.redo()}
 document.getElementById('print').onclick=()=>window.print()
 document.getElementById('backup').onclick=()=>download(new Blob([JSON.stringify({format:'mitschrift-yjs-v1',state:toB64(Y.encodeStateAsUpdate(doc))})],{type:'application/json'}),'Mitschrift-Sicherung.json')
-const updateStats=()=>{const t=quill.getText().trim();document.getElementById('stats').textContent=(t?t.split(/\s+/).length:0)+' Wörter · '+assets.size+' Word-Datei(en)'}
+const updateStats=()=>{const t=quill.getText().trim();document.getElementById('stats').textContent=(t?t.split(/\s+/).length:0)+' Wörter'}
 quill.on('text-change',updateStats); assets.observe(updateStats);updateStats()
 document.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')) e.preventDefault()})
 document.addEventListener('drop',e=>{const file=[...e.dataTransfer.files].find(f=>/\.docx$/i.test(f.name));if(file){e.preventDefault();prepareImport(file)}})
